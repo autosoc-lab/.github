@@ -3,8 +3,7 @@
 **취약한 병원 예약 웹 애플리케이션**을 미끼로 AWS 위에 SQLi / SSRF / RCE / SSE-C 등 실제 공격 표면을 만들고,
 Wazuh(SIEM)로 탐지하고 Shuffle(SOAR)로 자동 대응까지 엔드투엔드로 재현하는 **자동화 SOC 실습 플랫폼**입니다.
 
-4개의 레포지토리(앱, 인프라, C2, SOAR)가 하나의 실습 시나리오로 연결되어 있으며, `terraform apply` 한 번으로
-공격 대상 웹앱 + WAF + SIEM + SOAR 전체 파이프라인이 AWS에 배포됩니다.
+4개의 레포지토리(앱, 인프라, C2, SOAR)가 하나의 실습 시나리오로 연결되어 있으며, Terraform으로 공격 대상 웹앱 + WAF + SIEM + SOAR 전체 파이프라인을 AWS에 재현할 수 있습니다.
 
 >  모든 취약점과 인프라 설정은 **보안 실습 전용으로 의도적으로 도입**되었습니다. 프로덕션 환경에서 사용하지 마세요.
 
@@ -14,7 +13,7 @@ Wazuh(SIEM)로 탐지하고 Shuffle(SOAR)로 자동 대응까지 엔드투엔드
 
 | 목표 | 내용 |
 | --- | --- |
-| 공격 시뮬레이션 | SQL Injection, 세션 토큰 탈취, SSRF를 통한 EC2 인스턴스 크리덴셜 탈취, 유출 SSH 키 기반 권한 상승, S3 SSE-C 랜섬웨어 등 |
+| 공격 시뮬레이션 | SSRF를 통한 EC2 인스턴스 크리덴셜 탈취, 유출 SSH 키 기반 권한 상승, S3 SSE-C 랜섬웨어 등 |
 | 탐지 | Wazuh가 호스트 이벤트(FIM/auditd/access log)와 AWS 로그(CloudTrail·VPC Flow Logs)를 통합 룰 매칭 |
 | 대응 | Wazuh 알림을 Shuffle 웹훅으로 전달 → 워크플로가 Discord 알림 + 자동 대응(API 키 폐기, 인스턴스 격리, 세션 revoke 등) 실행 |
 | 인프라 | Terraform으로 VPC/EC2/RDS/S3/CloudTrail까지 전체를 코드로 재현·정리(destroy) 가능 |
@@ -49,25 +48,20 @@ Wazuh(SIEM)로 탐지하고 Shuffle(SOAR)로 자동 대응까지 엔드투엔드
 
 ### 1. 인프라 구조 (`vuln-hospital-booking-infra`)
 
-```mermaid
-flowchart TB
-    subgraph TF["Terraform Root"]
-        NET["modules/networking\nVPC · Public/Private Subnet · IGW · SG"]
-        APP["modules/app\nWEB EC2 · RDS · Document S3 · WAF"]
-        WAZUHM["modules/wazuh\nWazuh EC2 · 커스텀 룰/디코더"]
-        SHUF["modules/shuffle\nShuffle EC2 (docker compose)"]
-        C2M["modules/c2\nC2 EC2"]
-        SEC["modules/security_monitoring\nCloudTrail · VPC Flow Logs · Logs S3"]
-    end
-    NET --> APP
-    NET --> WAZUHM
-    NET --> SHUF
-    NET --> C2M
-    NET --> SEC
-```
+`vuln-hospital-booking-infra`는 AWS 실습 환경을 Terraform으로 배포하는 인프라 레포입니다. 하나의 VPC 안에 공격 대상 웹앱, RDS, S3 문서 버킷, Wazuh SIEM, Shuffle SOAR, C2 서버, CloudTrail/VPC Flow Logs 기반 로그 수집 환경을 구성합니다.
 
-`main.tf`가 위 모듈들을 조립해 VPC 하나에 실습에 필요한 전체 스택(공격 대상, 탐지, 대응, 공격자 인프라)을 함께 생성합니다.
-`ssh/vuln-hospital-lab.pem`은 유출 SSH 키 기반 권한 상승 실습용으로 의도적으로 배포되는 키입니다.
+| 모듈 | 역할 |
+| --- | --- |
+| `networking` | VPC, 서브넷, 보안그룹 구성 |
+| `app` | WEB EC2, RDS, S3 문서 버킷, WAF 배포 |
+| `security_monitoring` | CloudTrail, VPC Flow Logs, Logs S3 구성 |
+| `wazuh` | Wazuh 서버와 커스텀 룰·디코더 배포 |
+| `shuffle` | Shuffle SOAR와 대응 API 구성 |
+| `c2` | 유출 데이터 수신용 C2 서버 구성 |
+
+웹앱 서버의 access log, auditd, FIM 이벤트는 Wazuh Agent를 통해 수집되고, CloudTrail/VPC Flow Logs는 Logs S3 Bucket을 거쳐 Wazuh가 분석합니다. Wazuh에서 발생한 알림은 Shuffle 웹훅으로 전달되어 Discord 알림과 자동 대응으로 이어집니다.
+
+SSH 유출 시나리오를 위해 앱 EC2에는 `deploy` 계정과 실습용 SSH 키, 그리고 그룹 쓰기 권한이 열린 백업 헬퍼 파일이 의도적으로 구성되어 있습니다. 이를 통해 SSH 침투, 권한 상승, 데이터 수집·반출, 탐지·대응 흐름을 재현할 수 있습니다.
 
 ### 2. 웹 애플리케이션 구조 (`vuln-hospital-booking`)
 
